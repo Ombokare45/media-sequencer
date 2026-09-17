@@ -11,6 +11,11 @@ import (
 func GetMedia(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		rows, err := db.Query(`
 			SELECT id, name, type, url, duration_seconds
 			FROM media
@@ -18,9 +23,14 @@ func GetMedia(db *sql.DB) http.HandlerFunc {
 		`)
 
 		if err != nil {
-			http.Error(w, "Failed to fetch media", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to fetch media",
+				http.StatusInternalServerError,
+			)
 			return
 		}
+
 		defer rows.Close()
 
 		mediaList := []models.Media{}
@@ -29,16 +39,18 @@ func GetMedia(db *sql.DB) http.HandlerFunc {
 
 			var media models.Media
 
-			err := rows.Scan(
+			if err := rows.Scan(
 				&media.ID,
 				&media.Name,
 				&media.Type,
 				&media.URL,
 				&media.DurationSeconds,
-			)
-
-			if err != nil {
-				http.Error(w, "Failed to read media data", http.StatusInternalServerError)
+			); err != nil {
+				http.Error(
+					w,
+					"Failed to read media",
+					http.StatusInternalServerError,
+				)
 				return
 			}
 
@@ -50,6 +62,7 @@ func GetMedia(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(mediaList)
 	}
 }
+
 func CreateMedia(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -58,37 +71,69 @@ func CreateMedia(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		var media models.Media
+		var request struct {
+			Name            string `json:"name"`
+			Type            string `json:"type"`
+			URL             string `json:"url"`
+			DurationSeconds int    `json:"duration_seconds"`
+		}
 
-		err := json.NewDecoder(r.Body).Decode(&media)
-		if err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(
+				w,
+				"Invalid request body",
+				http.StatusBadRequest,
+			)
 			return
 		}
 
-		result, err := db.Exec(`
+		if request.Name == "" {
+			http.Error(w, "Media name is required", http.StatusBadRequest)
+			return
+		}
+
+		if request.Type == "" {
+			http.Error(w, "Media type is required", http.StatusBadRequest)
+			return
+		}
+
+		if request.DurationSeconds <= 0 {
+			http.Error(
+				w,
+				"Duration must be greater than 0",
+				http.StatusBadRequest,
+			)
+			return
+		}
+
+		var media models.Media
+
+		err := db.QueryRow(`
 			INSERT INTO media
-			(name, type, url, duration_seconds)
-			VALUES (?, ?, ?, ?)
+				(name, type, url, duration_seconds)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, name, type, url, duration_seconds
 		`,
-			media.Name,
-			media.Type,
-			media.URL,
-			media.DurationSeconds,
+			request.Name,
+			request.Type,
+			request.URL,
+			request.DurationSeconds,
+		).Scan(
+			&media.ID,
+			&media.Name,
+			&media.Type,
+			&media.URL,
+			&media.DurationSeconds,
 		)
 
 		if err != nil {
-			http.Error(w, "Failed to create media", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to create media",
+				http.StatusInternalServerError,
+			)
 			return
 		}
-
-		id, err := result.LastInsertId()
-		if err != nil {
-			http.Error(w, "Failed to get media ID", http.StatusInternalServerError)
-			return
-		}
-
-		media.ID = int(id)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

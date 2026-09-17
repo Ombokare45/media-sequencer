@@ -10,60 +10,61 @@ import (
 func StartSync(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
 		var request struct {
 			MediaID         int `json:"media_id"`
 			DurationSeconds int `json:"duration_seconds"`
 		}
 
-		err := json.NewDecoder(r.Body).Decode(&request)
-		if err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
 
 		if request.MediaID <= 0 {
-			http.Error(w, "Invalid media_id", http.StatusBadRequest)
+			http.Error(w, "Invalid media ID", http.StatusBadRequest)
 			return
 		}
 
 		if request.DurationSeconds <= 0 {
-			http.Error(w, "Invalid duration_seconds", http.StatusBadRequest)
+			http.Error(
+				w,
+				"Duration must be greater than 0",
+				http.StatusBadRequest,
+			)
 			return
 		}
 
-		// Check that media exists
-		var mediaName string
+		// Verify that the media exists.
+		var mediaExists int
 
-		err = db.QueryRow(`
-			SELECT name
+		err := db.QueryRow(`
+			SELECT id
 			FROM media
-			WHERE id = ?
-		`, request.MediaID).Scan(&mediaName)
-
-		if err == sql.ErrNoRows {
-			http.Error(w, "Media not found", http.StatusNotFound)
-			return
-		}
+			WHERE id = $1
+		`, request.MediaID).Scan(&mediaExists)
 
 		if err != nil {
-			http.Error(w, "Failed to check media", http.StatusInternalServerError)
+			if err == sql.ErrNoRows {
+				http.Error(w, "Media not found", http.StatusNotFound)
+				return
+			}
+
+			http.Error(
+				w,
+				"Failed to verify media",
+				http.StatusInternalServerError,
+			)
 			return
 		}
 
-		// Use UTC so every display window has the same reference time.
 		startedAt := time.Now().UTC()
 
-		// Store the active sync state.
 		_, err = db.Exec(`
 			UPDATE sync_state
-			SET media_id = ?,
-				started_at = ?,
-				duration_seconds = ?,
+			SET
+				media_id = $1,
+				started_at = $2,
+				duration_seconds = $3,
 				active = 1
 			WHERE id = 1
 		`,
@@ -73,104 +74,133 @@ func StartSync(db *sql.DB) http.HandlerFunc {
 		)
 
 		if err != nil {
-			http.Error(w, "Failed to start sync", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to start sync",
+				http.StatusInternalServerError,
+			)
 			return
-		}
-
-		response := map[string]interface{}{
-			"status":           "sync_started",
-			"media_id":         request.MediaID,
-			"media_name":       mediaName,
-			"started_at":       startedAt,
-			"duration_seconds": request.DurationSeconds,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(response)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message":          "Sync started successfully",
+			"media_id":         request.MediaID,
+			"started_at":       startedAt,
+			"duration_seconds": request.DurationSeconds,
+			"active":           true,
+		})
 	}
 }
+
 func GetSyncState(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
 		var (
 			mediaID         sql.NullInt64
-			startedAt       sql.NullString
-			durationSeconds int
-			active          int
 			mediaName       sql.NullString
 			mediaType       sql.NullString
 			mediaURL        sql.NullString
+			startedAt       sql.NullTime
+			durationSeconds int
+			active          int
 		)
 
 		err := db.QueryRow(`
 			SELECT
 				s.media_id,
-				s.started_at,
-				s.duration_seconds,
-				s.active,
 				m.name,
 				m.type,
-				m.url
+				m.url,
+				s.started_at,
+				s.duration_seconds,
+				s.active
 			FROM sync_state s
 			LEFT JOIN media m ON s.media_id = m.id
 			WHERE s.id = 1
 		`).Scan(
 			&mediaID,
-			&startedAt,
-			&durationSeconds,
-			&active,
 			&mediaName,
 			&mediaType,
 			&mediaURL,
+			&startedAt,
+			&durationSeconds,
+			&active,
 		)
 
 		if err != nil {
-			http.Error(w, "Failed to fetch sync state", http.StatusInternalServerError)
+			if err == sql.ErrNoRows {
+				http.Error(w, "Sync state not found", http.StatusNotFound)
+				return
+			}
+
+			http.Error(
+				w,
+				"Failed to fetch sync state",
+				http.StatusInternalServerError,
+			)
 			return
 		}
 
-		// Check whether the sync duration has expired.
+		// Automatically expire the sync when its duration ends.
 		if active == 1 && startedAt.Valid {
 
-			startTime, err := time.Parse(time.RFC3339Nano, startedAt.String)
-			if err == nil {
+			elapsed := time.Since(startedAt.Time).Seconds()
 
-				elapsed := time.Since(startTime).Seconds()
+			if elapsed >= float64(durationSeconds) {
 
-				if elapsed >= float64(durationSeconds) {
+				_, err := db.Exec(`
+					UPDATE sync_state
+					SET active = 0
+					WHERE id = 1
+				`)
 
-					// Mark sync as inactive.
-					_, err = db.Exec(`
-						UPDATE sync_state
-						SET active = 0
-						WHERE id = 1
-					`)
-
-					if err == nil {
-						active = 0
-					}
+				if err != nil {
+					http.Error(
+						w,
+						"Failed to update sync state",
+						http.StatusInternalServerError,
+					)
+					return
 				}
+
+				active = 0
 			}
 		}
 
 		response := map[string]interface{}{
-			"active":           active == 1,
-			"media_id":         mediaID.Int64,
-			"media_name":       mediaName.String,
-			"media_type":       mediaType.String,
-			"url":              mediaURL.String,
-			"started_at":       startedAt.String,
+			"media_id":         nil,
+			"media_name":       nil,
+			"type":             nil,
+			"url":              nil,
+			"started_at":       nil,
 			"duration_seconds": durationSeconds,
+			"active":           active == 1,
+		}
+
+		if mediaID.Valid {
+			response["media_id"] = mediaID.Int64
+		}
+
+		if mediaName.Valid {
+			response["media_name"] = mediaName.String
+		}
+
+		if mediaType.Valid {
+			response["type"] = mediaType.String
+		}
+
+		if mediaURL.Valid {
+			response["url"] = mediaURL.String
+		}
+
+		if startedAt.Valid {
+			response["started_at"] = startedAt.Time
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+
 		json.NewEncoder(w).Encode(response)
 	}
 }

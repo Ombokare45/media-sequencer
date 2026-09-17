@@ -11,31 +11,37 @@ import (
 func GetWindows(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		rows, err := db.Query(`
 			SELECT id, name
 			FROM windows
 			ORDER BY id
 		`)
-
 		if err != nil {
 			http.Error(w, "Failed to fetch windows", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		var windows []models.Window
+		windows := []models.Window{}
 
 		for rows.Next() {
 
 			var window models.Window
 
-			err := rows.Scan(
+			if err := rows.Scan(
 				&window.ID,
 				&window.Name,
-			)
-
-			if err != nil {
-				http.Error(w, "Failed to read window data", http.StatusInternalServerError)
+			); err != nil {
+				http.Error(
+					w,
+					"Failed to read windows",
+					http.StatusInternalServerError,
+				)
 				return
 			}
 

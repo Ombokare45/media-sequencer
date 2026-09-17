@@ -5,28 +5,25 @@ import (
 	"fmt"
 	"os"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func Connect() (*sql.DB, error) {
-	if err := os.MkdirAll("data", 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
+
+	databaseURL := os.Getenv("DATABASE_URL")
+
+	if databaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL environment variable is not set")
 	}
 
-	dbPath := os.Getenv("DB_PATH")
-
-	if dbPath == "" {
-		dbPath = "data/sequencer.db"
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open PostgreSQL connection: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
 
 	return db, nil

@@ -13,15 +13,7 @@ import (
 func GetPlaylist(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		// Get window ID from URL
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-
-		if len(parts) < 4 {
-			http.Error(w, "Invalid window ID", http.StatusBadRequest)
-			return
-		}
-
-		windowID, err := strconv.Atoi(parts[2])
+		windowID, err := getWindowID(r.URL.Path)
 		if err != nil {
 			http.Error(w, "Invalid window ID", http.StatusBadRequest)
 			return
@@ -39,14 +31,19 @@ func GetPlaylist(db *sql.DB) http.HandlerFunc {
 				m.duration_seconds
 			FROM playlist_items pi
 			JOIN media m ON pi.media_id = m.id
-			WHERE pi.window_id = ?
+			WHERE pi.window_id = $1
 			ORDER BY pi.position
 		`, windowID)
 
 		if err != nil {
-			http.Error(w, "Failed to fetch playlist", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to fetch playlist",
+				http.StatusInternalServerError,
+			)
 			return
 		}
+
 		defer rows.Close()
 
 		playlist := []models.PlaylistItem{}
@@ -55,7 +52,7 @@ func GetPlaylist(db *sql.DB) http.HandlerFunc {
 
 			var item models.PlaylistItem
 
-			err := rows.Scan(
+			if err := rows.Scan(
 				&item.ID,
 				&item.WindowID,
 				&item.MediaID,
@@ -64,10 +61,12 @@ func GetPlaylist(db *sql.DB) http.HandlerFunc {
 				&item.MediaType,
 				&item.URL,
 				&item.DurationSeconds,
-			)
-
-			if err != nil {
-				http.Error(w, "Failed to read playlist data", http.StatusInternalServerError)
+			); err != nil {
+				http.Error(
+					w,
+					"Failed to read playlist",
+					http.StatusInternalServerError,
+				)
 				return
 			}
 
@@ -79,119 +78,120 @@ func GetPlaylist(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(playlist)
 	}
 }
+
 func AddToPlaylist(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Get window ID from URL
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-
-		if len(parts) < 4 {
-			http.Error(w, "Invalid window ID", http.StatusBadRequest)
-			return
-		}
-
-		windowID, err := strconv.Atoi(parts[2])
+		windowID, err := getWindowID(r.URL.Path)
 		if err != nil {
 			http.Error(w, "Invalid window ID", http.StatusBadRequest)
 			return
 		}
 
-		// Request body
 		var request struct {
 			MediaID int `json:"media_id"`
 		}
 
-		err = json.NewDecoder(r.Body).Decode(&request)
-		if err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
 
 		if request.MediaID <= 0 {
-			http.Error(w, "Invalid media_id", http.StatusBadRequest)
+			http.Error(w, "Invalid media ID", http.StatusBadRequest)
 			return
 		}
 
-		// Find the next playlist position
 		var position int
 
 		err = db.QueryRow(`
 			SELECT COALESCE(MAX(position), -1) + 1
 			FROM playlist_items
-			WHERE window_id = ?
+			WHERE window_id = $1
 		`, windowID).Scan(&position)
 
 		if err != nil {
-			http.Error(w, "Failed to determine playlist position", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to determine playlist position",
+				http.StatusInternalServerError,
+			)
 			return
 		}
 
-		// Add media to playlist
-		result, err := db.Exec(`
+		var item models.PlaylistItem
+
+		err = db.QueryRow(`
 			INSERT INTO playlist_items
-			(window_id, media_id, position)
-			VALUES (?, ?, ?)
-		`, windowID, request.MediaID, position)
+				(window_id, media_id, position)
+			VALUES ($1, $2, $3)
+			RETURNING id, window_id, media_id, position
+		`, windowID, request.MediaID, position).Scan(
+			&item.ID,
+			&item.WindowID,
+			&item.MediaID,
+			&item.Position,
+		)
 
 		if err != nil {
-			http.Error(w, "Failed to add media to playlist", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to add media to playlist",
+				http.StatusInternalServerError,
+			)
 			return
-		}
-
-		id, err := result.LastInsertId()
-		if err != nil {
-			http.Error(w, "Failed to get playlist item ID", http.StatusInternalServerError)
-			return
-		}
-
-		response := map[string]interface{}{
-			"id":        id,
-			"window_id": windowID,
-			"media_id":  request.MediaID,
-			"position":  position,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 
-		json.NewEncoder(w).Encode(response)
+		json.NewEncoder(w).Encode(item)
 	}
 }
+
 func ResetPlaylist(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 
-		if len(parts) < 4 {
-			http.Error(w, "Invalid window ID", http.StatusBadRequest)
-			return
-		}
-
-		windowID, err := strconv.Atoi(parts[2])
+		windowID, err := getWindowID(r.URL.Path)
 		if err != nil {
 			http.Error(w, "Invalid window ID", http.StatusBadRequest)
 			return
 		}
 
-		_, err = db.Exec(
-			"DELETE FROM playlist_items WHERE window_id = ?",
-			windowID,
-		)
+		_, err = db.Exec(`
+			DELETE FROM playlist_items
+			WHERE window_id = $1
+		`, windowID)
 
 		if err != nil {
-			http.Error(w, "Failed to reset playlist", http.StatusInternalServerError)
+			http.Error(
+				w,
+				"Failed to reset playlist",
+				http.StatusInternalServerError,
+			)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "success",
-			"message":   "Playlist reset successfully",
-			"window_id": windowID,
+
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Playlist reset successfully",
 		})
 	}
+}
+
+func getWindowID(path string) (int, error) {
+
+	parts := strings.Split(
+		strings.Trim(path, "/"),
+		"/",
+	)
+
+	// Expected:
+	// /api/windows/{id}/playlist
+	if len(parts) < 4 {
+		return 0, strconv.ErrSyntax
+	}
+
+	return strconv.Atoi(parts[2])
 }

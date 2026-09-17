@@ -1,10 +1,13 @@
 package database
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+)
 
 func SeedData(db *sql.DB) error {
 
-	// Add media
+	// Seed media
 	media := []struct {
 		name      string
 		mediaType string
@@ -20,17 +23,18 @@ func SeedData(db *sql.DB) error {
 
 	for _, m := range media {
 		_, err := db.Exec(`
-			INSERT OR IGNORE INTO media
+			INSERT INTO media
 			(name, type, url, duration_seconds)
-			VALUES (?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (name) DO NOTHING
 		`, m.name, m.mediaType, m.url, m.duration)
 
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to seed media %s: %w", m.name, err)
 		}
 	}
 
-	// Add windows
+	// Seed windows
 	windows := []string{
 		"Window 1",
 		"Window 2",
@@ -40,48 +44,97 @@ func SeedData(db *sql.DB) error {
 
 	for _, name := range windows {
 		_, err := db.Exec(`
-			INSERT OR IGNORE INTO windows (name)
-			VALUES (?)
+			INSERT INTO windows (name)
+			VALUES ($1)
+			ON CONFLICT (name) DO NOTHING
 		`, name)
 
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to seed window %s: %w", name, err)
 		}
 	}
 
-	// Add playlists
-	playlists := map[int][]int{
-		1: {1, 2, 3},
-		2: {2, 4, 5},
-		3: {1, 3, 4},
-		4: {5, 2, 1},
+	// Get actual media IDs
+	mediaIDs := make(map[string]int)
+
+	for _, name := range []string{"M1", "M2", "M3", "M4", "M5"} {
+		var id int
+
+		err := db.QueryRow(`
+			SELECT id
+			FROM media
+			WHERE name = $1
+		`, name).Scan(&id)
+
+		if err != nil {
+			return fmt.Errorf("failed to find media %s: %w", name, err)
+		}
+
+		mediaIDs[name] = id
 	}
 
-	for windowID, mediaIDs := range playlists {
+	// Get actual window IDs
+	windowIDs := make(map[string]int)
 
-		for position, mediaID := range mediaIDs {
+	for _, name := range windows {
+		var id int
+
+		err := db.QueryRow(`
+			SELECT id
+			FROM windows
+			WHERE name = $1
+		`, name).Scan(&id)
+
+		if err != nil {
+			return fmt.Errorf("failed to find window %s: %w", name, err)
+		}
+
+		windowIDs[name] = id
+	}
+
+	// Seed playlists
+	playlists := map[string][]string{
+		"Window 1": {"M1", "M2", "M3"},
+		"Window 2": {"M2", "M4", "M5"},
+		"Window 3": {"M1", "M3", "M4"},
+		"Window 4": {"M5", "M2", "M1"},
+	}
+
+	for windowName, mediaNames := range playlists {
+
+		windowID := windowIDs[windowName]
+
+		for position, mediaName := range mediaNames {
+
+			mediaID := mediaIDs[mediaName]
 
 			_, err := db.Exec(`
-				INSERT OR IGNORE INTO playlist_items
+				INSERT INTO playlist_items
 				(window_id, media_id, position)
-				VALUES (?, ?, ?)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (window_id, media_id, position) DO NOTHING
 			`, windowID, mediaID, position)
 
 			if err != nil {
-				return err
+				return fmt.Errorf(
+					"failed to seed playlist for %s: %w",
+					windowName,
+					err,
+				)
 			}
 		}
 	}
 
-	// Initialize sync state
+	// Seed sync state
 	_, err := db.Exec(`
-		INSERT OR IGNORE INTO sync_state
+		INSERT INTO sync_state
 		(id, active)
 		VALUES (1, 0)
+		ON CONFLICT (id) DO NOTHING
 	`)
 
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to seed sync state: %w", err)
 	}
 
 	return nil
