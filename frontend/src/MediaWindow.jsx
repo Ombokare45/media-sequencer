@@ -1,282 +1,469 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const FIVE_HOURS = 5 * 60 * 60 * 1000;
+const CYCLE_SECONDS = 5 * 60 * 60; // 5 hours
 
 function MediaWindow({ window, syncState }) {
+  const normalVideoRef = useRef(null);
+  const syncVideoRef = useRef(null);
+  const cycleStartRef = useRef(Date.now());
+
   const [currentIndex, setCurrentIndex] = useState(0);
-const [mediaError, setMediaError] = useState(false);
+  const [mediaError, setMediaError] = useState(false);
 
-const syncVideoRef = useRef(null);
-const cycleStartRef = useRef(Date.now());
+  const playlist = window.playlist || [];
 
-const playlist = window.playlist || [];
-const currentItem = playlist[currentIndex];
+  /*
+   * Normalize playlist media.
+   *
+   * Playlist API uses:
+   *   media_type
+   *
+   * Sync API uses:
+   *   type
+   *
+   * We convert both into the same "type" field.
+   */
+  const normalizedPlaylist = useMemo(() => {
+    return playlist.map((item) => ({
+      ...item,
+      type: item.type || item.media_type || "",
+      name: item.media_name || item.name || `Media ${item.media_id}`,
+    }));
+  }, [playlist]);
 
-useEffect(() => {
-  setMediaError(false);
-}, [currentItem?.id]);
-
-  // --------------------------------------------------
-  // 5-HOUR NORMAL PLAYBACK CYCLE
-  // --------------------------------------------------
-
+  /*
+   * Reset playback timing only when the playlist
+   * actually becomes empty/non-empty.
+   */
   useEffect(() => {
-    if (playlist.length === 0 || syncState?.active) {
+    if (playlist.length === 0) {
+      setCurrentIndex(0);
+      cycleStartRef.current = Date.now();
+    }
+  }, [playlist.length]);
+
+  /*
+   * Determine the normal playlist item based on elapsed
+   * time inside the 5-hour cycle.
+   */
+  useEffect(() => {
+    if (normalizedPlaylist.length === 0) {
       return;
     }
 
-    const updateCurrentMedia = () => {
-      const now = Date.now();
+    const calculateCurrentItem = () => {
+      const elapsed =
+        (Date.now() - cycleStartRef.current) / 1000;
 
-      // Position inside the current 5-hour cycle
-      const cycleElapsed =
-        (now - cycleStartRef.current) % FIVE_HOURS;
+      const cyclePosition =
+        elapsed % CYCLE_SECONDS;
 
-     const playlistTotalMs = playlist.reduce(
-  (total, item) =>
-    total +
-    Math.max(item.duration_seconds, 1) * 1000,
-  0
-);
+      let accumulated = 0;
+      let selectedIndex = 0;
 
-// Repeat the playlist continuously
-const positionInPlaylist =
-  cycleElapsed % playlistTotalMs;
+      /*
+       * The playlist repeats continuously.
+       * We use the configured duration of each media item.
+       */
+      const totalPlaylistDuration =
+        normalizedPlaylist.reduce(
+          (total, item) =>
+            total + Math.max(Number(item.duration_seconds) || 1, 1),
+          0
+        );
 
-let elapsed = positionInPlaylist;
-let selectedIndex = 0;
+      if (totalPlaylistDuration > 0) {
+        const playlistPosition =
+          cyclePosition % totalPlaylistDuration;
 
-for (let i = 0; i < playlist.length; i++) {
-  const duration =
-    Math.max(playlist[i].duration_seconds, 1) * 1000;
+        accumulated = 0;
 
-  if (elapsed < duration) {
-    selectedIndex = i;
-    break;
-  }
+        for (let i = 0; i < normalizedPlaylist.length; i++) {
+          const duration = Math.max(
+            Number(normalizedPlaylist[i].duration_seconds) || 1,
+            1
+          );
 
-  elapsed -= duration;
-}
+          accumulated += duration;
+
+          if (playlistPosition < accumulated) {
+            selectedIndex = i;
+            break;
+          }
+        }
+      }
 
       setCurrentIndex(selectedIndex);
     };
 
-    updateCurrentMedia();
+    calculateCurrentItem();
 
     const interval = setInterval(
-      updateCurrentMedia,
+      calculateCurrentItem,
+      500
+    );
+
+    return () => clearInterval(interval);
+  }, [normalizedPlaylist]);
+
+  /*
+   * Clear media error whenever the displayed item changes.
+   */
+  useEffect(() => {
+    setMediaError(false);
+  }, [currentIndex, syncState?.active, syncState?.media_id]);
+
+  const currentItem =
+    normalizedPlaylist.length > 0
+      ? normalizedPlaylist[currentIndex] ||
+        normalizedPlaylist[0]
+      : null;
+
+  /*
+   * Synchronization media.
+   *
+   * Sync API returns:
+   * {
+   *   media_id,
+   *   media_name,
+   *   type,
+   *   url,
+   *   duration_seconds,
+   *   started_at
+   * }
+   */
+  const syncItem = syncState?.active
+    ? {
+        id: syncState.media_id,
+        media_id: syncState.media_id,
+        name: syncState.media_name,
+        type: syncState.type || syncState.media_type || "",
+        url: syncState.url || "",
+        duration_seconds:
+          Number(syncState.duration_seconds) || 1,
+      }
+    : null;
+
+  /*
+   * Keep synchronized video position aligned using the
+   * backend's started_at timestamp.
+   */
+  useEffect(() => {
+    if (
+      !syncState?.active ||
+      !syncVideoRef.current ||
+      syncItem?.type !== "video" ||
+      !syncState.started_at
+    ) {
+      return;
+    }
+
+    const video = syncVideoRef.current;
+
+    const synchronizeVideo = () => {
+      const startedAt = new Date(
+        syncState.started_at
+      ).getTime();
+
+      const elapsed =
+        (Date.now() - startedAt) / 1000;
+
+      if (elapsed < 0) {
+        return;
+      }
+
+      /*
+       * Use the actual video duration when available.
+       * This prevents seeking beyond the real video length.
+       */
+      const actualDuration =
+        Number.isFinite(video.duration) &&
+        video.duration > 0
+          ? video.duration
+          : Number(syncState.duration_seconds) || 1;
+
+      const targetTime =
+        elapsed % actualDuration;
+
+      /*
+       * Only seek when the difference is meaningful.
+       */
+      if (
+        Number.isFinite(video.currentTime) &&
+        Math.abs(video.currentTime - targetTime) > 0.5
+      ) {
+        try {
+          video.currentTime = targetTime;
+        } catch {
+          // Browser may reject seeking before metadata loads.
+        }
+      }
+
+      video
+        .play()
+        .catch(() => {
+          // Muted autoplay should normally succeed.
+        });
+    };
+
+    synchronizeVideo();
+
+    const interval = setInterval(
+      synchronizeVideo,
       500
     );
 
     return () => clearInterval(interval);
   }, [
-    playlist,
     syncState?.active,
+    syncState?.started_at,
+    syncState?.media_id,
+    syncItem?.type,
   ]);
 
-  // --------------------------------------------------
-  // SYNCHRONIZED VIDEO POSITION
-  // --------------------------------------------------
-
+  /*
+   * Keep normal videos playing.
+   */
   useEffect(() => {
     if (
-      !syncState?.active ||
-      syncState.media_type !== "video" ||
-      !syncState.started_at ||
-      !syncVideoRef.current
+      syncState?.active ||
+      !currentItem ||
+      currentItem.type !== "video" ||
+      !normalVideoRef.current
     ) {
       return;
     }
 
-    const startTime =
-      new Date(syncState.started_at).getTime();
+    const video = normalVideoRef.current;
 
-    if (Number.isNaN(startTime)) {
-      return;
-    }
-
-    const elapsedSeconds =
-      (Date.now() - startTime) / 1000;
-
-    const mediaDuration =
-      syncState.duration_seconds || 1;
-
-    const position =
-      elapsedSeconds % mediaDuration;
-
-    syncVideoRef.current.currentTime = position;
+    video
+      .play()
+      .catch(() => {
+        // Muted autoplay should normally work.
+      });
   }, [
+    currentItem?.id,
+    currentItem?.url,
+    currentItem?.type,
     syncState?.active,
-    syncState?.started_at,
-    syncState?.media_type,
-    syncState?.duration_seconds,
   ]);
 
-  // --------------------------------------------------
-  // SYNC PLAYBACK
-  // --------------------------------------------------
-
-  if (syncState?.active) {
-    return (
-      <div className="media-window">
-
-        <div className="window-header">
-          <h2>{window.name}</h2>
-
-          <span>
-            🔴 SYNC: {syncState.media_name}
-          </span>
+  function renderMedia(item, mode = "normal") {
+    if (!item) {
+      return (
+        <div className="media-placeholder">
+          No media configured
         </div>
-
-        <div className="display-area">
-
-          {syncState.media_type === "image" && (
-            <img
-              src={syncState.url}
-              alt={syncState.media_name}
-              className="media-content"
-            />
-          )}
-
-          {syncState.media_type === "video" && (
-            <video
-  key={syncState.started_at}
-  ref={syncVideoRef}
-  src={syncState.url}
-  className="media-content"
-  autoPlay
-  muted
-  playsInline
-  onLoadedMetadata={(event) => {
-    const startTime = new Date(syncState.started_at).getTime();
-
-    if (Number.isNaN(startTime)) {
-      return;
+      );
     }
 
-    const elapsedSeconds =
-      (Date.now() - startTime) / 1000;
+    /*
+     * IMPORTANT:
+     * Support both "type" and "media_type".
+     */
+    const type =
+      item.type || item.media_type || "";
 
-    const position =
-      elapsedSeconds % Math.max(syncState.duration_seconds, 1);
+    const name =
+      item.name ||
+      item.media_name ||
+      `Media ${item.media_id}`;
 
-    event.currentTarget.currentTime = position;
+    const url = item.url || "";
 
-    event.currentTarget
-      .play()
-      .catch((error) => {
-        console.log("Video autoplay prevented:", error);
-      });
-  }}
-/>
-          )}
+    /*
+     * IMAGE
+     */
+    if (type === "image") {
+      return (
+        <img
+          key={`${mode}-${item.id}-${url}`}
+          src={url}
+          alt={name}
+          className="media-content"
+          onError={() => setMediaError(true)}
+        />
+      );
+    }
 
-          {syncState.media_type === "blank" && (
-            <div className="blank-screen"></div>
-          )}
-
-          <div className="media-info">
-            🔴 Synchronized: {syncState.media_name}
+    /*
+     * VIDEO
+     */
+    if (type === "video") {
+      if (!url) {
+        return (
+          <div className="media-placeholder">
+            Video URL missing: {name}
           </div>
+        );
+      }
 
-        </div>
+      if (mode === "sync") {
+        return (
+          <video
+            key={`sync-${item.id}-${syncState?.started_at}`}
+            ref={syncVideoRef}
+            src={url}
+            className="media-content"
+            autoPlay
+            muted
+            playsInline
+            preload="auto"
+            onLoadedMetadata={(event) => {
+              const video = event.currentTarget;
 
+              if (!syncState?.started_at) {
+                return;
+              }
+
+              const startedAt = new Date(
+                syncState.started_at
+              ).getTime();
+
+              const elapsed =
+                (Date.now() - startedAt) / 1000;
+
+              if (elapsed >= 0) {
+                const duration =
+                  Number.isFinite(video.duration) &&
+                  video.duration > 0
+                    ? video.duration
+                    : Number(
+                        syncState.duration_seconds
+                      ) || 1;
+
+                video.currentTime =
+                  elapsed % duration;
+              }
+
+              video.play().catch(() => {});
+            }}
+            onCanPlay={(event) => {
+              event.currentTarget
+                .play()
+                .catch(() => {});
+            }}
+            onError={() => setMediaError(true)}
+          />
+        );
+      }
+
+      return (
+        <video
+          key={`normal-${item.id}-${url}`}
+          ref={normalVideoRef}
+          src={url}
+          className="media-content"
+          autoPlay
+          muted
+          playsInline
+          preload="auto"
+          loop
+          onCanPlay={(event) => {
+            event.currentTarget
+              .play()
+              .catch(() => {});
+          }}
+          onError={() => setMediaError(true)}
+        />
+      );
+    }
+
+    /*
+     * BLANK
+     */
+    if (type === "blank") {
+      return (
+        <div
+          key={`${mode}-blank-${item.id}`}
+          className="media-content blank-media"
+        />
+      );
+    }
+
+    /*
+     * Unknown media type
+     */
+    return (
+      <div className="media-placeholder">
+        Unsupported media type: {type || "unknown"} — {name}
       </div>
     );
   }
 
-  // --------------------------------------------------
-  // EMPTY PLAYLIST
-  // --------------------------------------------------
-
-  if (playlist.length === 0) {
+  /*
+   * SYNC MODE
+   */
+  if (syncState?.active && syncItem) {
     return (
-      <div className="media-window">
-
-        <div className="window-header">
+      <section className="media-window">
+        <header className="window-header">
           <h2>{window.name}</h2>
 
-          <span>
-            Window ID: {window.id}
+          <span className="sync-badge">
+            🔴 SYNC: {syncItem.name}
           </span>
+        </header>
+
+        <div className="media-area">
+          {mediaError ? (
+            <div className="media-placeholder">
+              Unable to play {syncItem.name}
+              <br />
+              <small>{syncItem.url}</small>
+            </div>
+          ) : (
+            renderMedia(syncItem, "sync")
+          )}
         </div>
 
-        <div className="display-area">
-          <p>No media configured</p>
-        </div>
-
-      </div>
+        <footer className="window-footer">
+          🔴 Synchronized:{" "}
+          <strong>{syncItem.name}</strong>
+        </footer>
+      </section>
     );
   }
 
-  // --------------------------------------------------
-  // NORMAL PLAYLIST DISPLAY
-  // --------------------------------------------------
-
+  /*
+   * NORMAL MODE
+   */
   return (
-    <div className="media-window">
-
-      <div className="window-header">
-
+    <section className="media-window">
+      <header className="window-header">
         <h2>{window.name}</h2>
 
-        <span>
-          Playing: {currentItem.media_name}
-        </span>
-
-      </div>
-
-      <div className="display-area">
-
-        {currentItem.media_type === "image" && !mediaError && (
-  <img
-    src={currentItem.url}
-    alt={currentItem.media_name}
-    className="media-content"
-    onError={() => setMediaError(true)}
-  />
-)}
-
-{currentItem.media_type === "image" && mediaError && (
-  <div className="fallback-screen">
-    <strong>Media unavailable</strong>
-  </div>
-)}
-
-        {currentItem.media_type === "video" && !mediaError && (
-  <video
-    src={currentItem.url}
-    className="media-content"
-    autoPlay
-    muted
-    playsInline
-    onError={() => setMediaError(true)}
-  />
-)}
-
-{currentItem.media_type === "video" && mediaError && (
-  <div className="fallback-screen">
-    <strong>Media unavailable</strong>
-  </div>
-)}
-
-        {currentItem.media_type === "blank" && (
-          <div className="blank-screen"></div>
+        {currentItem && (
+          <span className="normal-badge">
+            ▶ {currentItem.name}
+          </span>
         )}
-        {!["image", "video", "blank"].includes(currentItem.media_type) && (
-  <div className="fallback-screen">
-    <strong>Unsupported media type</strong>
-  </div>
-)}
+      </header>
 
-        <div className="media-info">
-          {currentItem.media_name} •{" "}
-          {currentItem.duration_seconds}s
-        </div>
-
+      <div className="media-area">
+        {mediaError ? (
+          <div className="media-placeholder">
+            Unable to play{" "}
+            {currentItem?.name || "media"}
+            <br />
+            <small>{currentItem?.url}</small>
+          </div>
+        ) : (
+          renderMedia(currentItem, "normal")
+        )}
       </div>
 
-    </div>
+      <footer className="window-footer">
+        {currentItem ? (
+          <>
+            ▶ Playing:{" "}
+            <strong>{currentItem.name}</strong>
+          </>
+        ) : (
+          "No playlist configured"
+        )}
+      </footer>
+    </section>
   );
 }
 

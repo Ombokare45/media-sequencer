@@ -11,7 +11,7 @@ import (
 
 func main() {
 
-	// Connect to SQLite database
+	// Connect to PostgreSQL database
 	db, err := database.Connect()
 	if err != nil {
 		log.Fatal(err)
@@ -23,70 +23,118 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Seed initial data
 	if err := database.SeedData(db); err != nil {
 		log.Fatal(err)
 	}
 
-	// Health check endpoint
+	// =========================
+	// Health Check
+	// =========================
 	http.HandleFunc("/api/health", healthHandler)
+
+	// =========================
+	// Windows
+	// =========================
 	http.HandleFunc("/api/windows", handlers.GetWindows(db))
 
+	// =========================
+	// Playlist
+	// GET    /api/windows/{id}/playlist
+	// POST   /api/windows/{id}/playlist
+	// DELETE /api/windows/{id}/playlist
+	// =========================
 	http.HandleFunc("/api/windows/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+
+		switch r.Method {
+
+		case http.MethodGet:
 			handlers.GetPlaylist(db)(w, r)
-			return
-		}
 
-		if r.Method == http.MethodPost {
+		case http.MethodPost:
 			handlers.AddToPlaylist(db)(w, r)
-			return
-		}
 
-		if r.Method == http.MethodDelete {
+		case http.MethodDelete:
 			handlers.ResetPlaylist(db)(w, r)
-			return
-		}
 
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		default:
+			http.Error(
+				w,
+				"Method not allowed",
+				http.StatusMethodNotAllowed,
+			)
+		}
 	})
+
+	// =========================
+	// Media
+	// GET  /api/media
+	// POST /api/media
+	// =========================
 	http.HandleFunc("/api/media", func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method == http.MethodGet {
+		switch r.Method {
+
+		case http.MethodGet:
 			handlers.GetMedia(db)(w, r)
-			return
-		}
 
-		if r.Method == http.MethodPost {
+		case http.MethodPost:
 			handlers.CreateMedia(db)(w, r)
-			return
-		}
 
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		default:
+			http.Error(
+				w,
+				"Method not allowed",
+				http.StatusMethodNotAllowed,
+			)
+		}
 	})
 
+	// =========================
+	// Update Media
+	// PUT /api/media/{id}
+	// =========================
+	http.HandleFunc("/api/media/", handlers.UpdateMedia(db))
+
+	// =========================
+	// Synchronization
+	// GET  /api/sync
+	// POST /api/sync
+	// =========================
 	http.HandleFunc("/api/sync", func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method == http.MethodPost {
+		switch r.Method {
+
+		case http.MethodPost:
 			handlers.StartSync(db)(w, r)
-			return
-		}
 
-		if r.Method == http.MethodGet {
+		case http.MethodGet:
 			handlers.GetSyncState(db)(w, r)
-			return
-		}
 
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		default:
+			http.Error(
+				w,
+				"Method not allowed",
+				http.StatusMethodNotAllowed,
+			)
+		}
 	})
-	// Start server
+
+	// =========================
+	// Start Server
+	// =========================
 	port := os.Getenv("PORT")
+
 	if port == "" {
 		port = "8080"
 	}
 
 	addr := "0.0.0.0:" + port
 
-	log.Printf("Media Sequencer API running on %s", addr)
+	log.Printf(
+		"Media Sequencer API running on %s",
+		addr,
+	)
 
 	handler := corsMiddleware(http.DefaultServeMux)
 
@@ -94,6 +142,10 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// =========================
+// Health Handler
+// =========================
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 
@@ -106,24 +158,47 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(response)
 }
+
+// =========================
+// CORS Middleware
+// =========================
+
 func corsMiddleware(next http.Handler) http.Handler {
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		origin := r.Header.Get("Origin")
 
-		allowedOrigin := os.Getenv("FRONTEND_URL")
-
-		if allowedOrigin == "" {
-			allowedOrigin = "http://localhost:5173"
+		allowedOrigins := map[string]bool{
+			"http://localhost:5173": true,
+			"http://localhost:4173": true,
 		}
 
-		if origin == allowedOrigin {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
+		// Allow deployed frontend
+		frontendURL := os.Getenv("FRONTEND_URL")
+
+		if frontendURL != "" {
+			allowedOrigins[frontendURL] = true
 		}
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if allowedOrigins[origin] {
+			w.Header().Set(
+				"Access-Control-Allow-Origin",
+				origin,
+			)
+		}
 
+		w.Header().Set(
+			"Access-Control-Allow-Methods",
+			"GET, POST, PUT, DELETE, OPTIONS",
+		)
+
+		w.Header().Set(
+			"Access-Control-Allow-Headers",
+			"Content-Type",
+		)
+
+		// Handle browser preflight request
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -131,5 +206,4 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
-
 }
