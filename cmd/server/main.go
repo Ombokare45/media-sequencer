@@ -78,12 +78,19 @@ func main() {
 
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
-	log.Println("Media Sequencer API running on :8080")
-
 	// Start server
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	addr := "0.0.0.0:" + port
+
+	log.Printf("Media Sequencer API running on %s", addr)
+
 	handler := corsMiddleware(http.DefaultServeMux)
 
-	if err := http.ListenAndServe(":8080", handler); err != nil {
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
